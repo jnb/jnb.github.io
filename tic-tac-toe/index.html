@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Tic Tac Toe in TLA+</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Tic Tac Toe in TLA+</h1>
+    </header>
+    <div class="content">
+        <p>Although I've written many informal specifications of software as part
+of my employments,
+I haven't ever written any <em>formal</em> specifications
+(and for good reason: in most domains, the return-on-investment
+likely isn't there).
+I like to pretend to myself that given enough time, I probably <em>could</em> write a
+formal specification,
+but what's it like to <em>actually</em> do this?</p>
+<span id="continue-reading"></span>
+<p>Here I go through the exercise of writing a formal specification of Tic Tac Toe
+in TLA+ / PlusCal,
+and then use the associated TLC model checker to see whether an example game is
+winnable.
+This felt like just the right level of difficulty to get a feel for writing a
+formal specification,
+and had the nice payoff of actually being &quot;useful&quot; for something!</p>
+<p>(Below I give code highlights; for the full details see
+<a href="https://gist.github.com/jnb/78d8232c1e91d1542a1ac1c5119ed13a">here</a>.)</p>
+<h2 id="the-game-state">The game state</h2>
+<p>We need to start by defining our game state, which involves a couple of TLA+
+definitions.</p>
+<p>First we need to know what the current board state is.
+For this, we're going to use a matrix, where the string &quot;atoms&quot; have the obvious
+meanings:</p>
+<pre style="background-color:#2b303b;color:#c0c5ce;"><code><span>board = &lt;&lt;
+</span><span>   &lt;&lt;&quot;o&quot;, &quot;.&quot;, &quot;x&quot;&gt;&gt;,
+</span><span>   &lt;&lt;&quot;.&quot;, &quot;o&quot;, &quot;.&quot;&gt;&gt;,
+</span><span>   &lt;&lt;&quot;.&quot;, &quot;.&quot;, &quot;.&quot;&gt;&gt; 
+</span><span>&gt;&gt;;
+</span></code></pre>
+<p>Secondly, we need to know which player is next to go:</p>
+<pre style="background-color:#2b303b;color:#c0c5ce;"><code><span>player = &quot;x&quot;;
+</span></code></pre>
+<h2 id="supporting-tla-definitions">Supporting TLA+ definitions</h2>
+<p>With the game state defined, we next define a TLA+ formula for what is means
+for a player <code>p</code> to win.
+Here <code>\E</code> and <code>\A</code> are the existential and universal quantifiers.</p>
+<pre style="background-color:#2b303b;color:#c0c5ce;"><code><span>winner(p) ==
+</span><span>  (* Rows *)
+</span><span>  \/ \E i \in 1..3: \A j \in 1..3: board[i][j] = p
+</span><span>  (* Columns *)
+</span><span>  \/ \E j \in 1..3: \A i \in 1..3: board[i][j] = p
+</span><span>  (* Diagonals *)
+</span><span>  \/ \A i \in 1..3: board[i][i] = p
+</span><span>  \/ \A i \in 1..3: board[4-i][i] = p
+</span></code></pre>
+<p>We also need to define what it means for there to be an unfilled board space:</p>
+<pre style="background-color:#2b303b;color:#c0c5ce;"><code><span>unfilled == \E i \in 1..3: \E j \in 1..3: board[i][j] = &quot;.&quot;
+</span></code></pre>
+<h2 id="the-game-algorithm">The game algorithm</h2>
+<p>Finally, we define our game algorithm in PlusCal,
+which will be automatically translated into TLA+.
+Note the use of <code>with</code> for non-deterministic choice
+(the model checker will explore all possible instantiations
+for us).</p>
+<pre style="background-color:#2b303b;color:#c0c5ce;"><code><span>while unfilled /\ ~(winner(&quot;o&quot;) \/ winner(&quot;x&quot;)) do
+</span><span>  with i \in 1..3, j \in 1..3 do
+</span><span>    if board[i][j] = &quot;.&quot; then
+</span><span>      board[i][j] := player;
+</span><span>      if player = &quot;x&quot; then player := &quot;o&quot; else player := &quot;x&quot; end if;
+</span><span>    end if;
+</span><span>  end with;
+</span><span>end while;
+</span><span>assert ~winner(&quot;x&quot;);
+</span></code></pre>
+<h2 id="using-the-tlc-model-checker">Using the TLC model checker</h2>
+<p>When we run this from the model checker,
+we see that it's possible to reach a state where where our
+&quot;x isn't the winner&quot; assertion fails:</p>
+<p><img src="https://www.monkeynut.org/tic-tac-toe/tlc.png" alt="image description" /></p>
+<p>Good luck <code>x</code>!</p>
+<h2 id="takeaways">Takeaways</h2>
+<p>(Caveats: I am not an expert, these are <em>my</em> takeaways,
+this was just a toy example etc.)</p>
+<p>I was initially wary of writing the definitions in &quot;math&quot;,
+but it actually ended up feeling liberating <em>not</em> having to define
+implementation details!
+For example, I loved that I could write existential and
+universal quantifiers,
+know that the model checker would automatically handle the
+&quot;implementation&quot; of them.</p>
+<p>With that said, I liked that I could still write the game algorithm in PlusCal
+(making use of TLA+ definitions);
+this gave the game algorithm a familiar, imperative feel.
+Which is exactly the point of PlusCal!
+It was also useful from the point-of-view of learning TLA+ to hit Command+T and
+see the corresponding TLA+ next-state relation.</p>
+<p>I can imagine eventually writing everything in TLA+,
+but for now I'll probably stick with a hybrid TLA+ / PlusCal
+approach.</p>
+<h2 id="resources">Resources</h2>
+<ul>
+<li><a href="https://lamport.azurewebsites.net/video/videos.html">TLA+ lectures</a>;
+The first four of Leslie Lamport's lectures
+are a great introduction to writing your first TLA+ spec.
+They're pretty short, and I found them laugh-out-loud funny.</li>
+<li><a href="https://learntla.com">Learn TLA+</a>; gives a good introduction to PlusCal.</li>
+<li><a href="https://lamport.azurewebsites.net/tla/p-manual.pdf">A PlusCal User's Manual</a>;
+gives the details of PlusCal.</li>
+<li><a href="https://cacm.acm.org/magazines/2015/4/184701-how-amazon-web-services-uses-formal-methods/abstract">How Amazon Web Services uses formal methods</a>;
+some examples of when it makes business-sense to use TLA+.</li>
+</ul>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date"> 2 June 2023</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
