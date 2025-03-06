@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Using control-tab to switch between Emacs buffers on macOS</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Using control-tab to switch between Emacs buffers on macOS</h1>
+    </header>
+    <div class="content">
+        <p>I use VSCode as my main code editor and emacs for everything else.  When in
+VSCode, I use control-tab to switch between recent buffers.  In Emacs, this key
+binding doesn't work (by default, it toggles visibility of the tab bar), causing
+me endless minor frustrations.  This post documents how I brought the VSCode
+control-tab behavior to Emacs.</p>
+<span id="continue-reading"></span>
+<p>In VSCode, the control-tab works as follows: when I hit control-tab it brings up
+the list of &quot;recent buffers&quot; and selects the most recent previous buffer.  While
+continuing to hold control, I can then repeatedly hit tab to select other
+buffers, in order of decreasing recency.  Releasing the control key will then
+take me to the selected buffer. (This is similar to how command-tab and alt-tab
+work for switching between applications in macOS and Windows respectively.)</p>
+<p>The obvious approach to getting this working under Emacs involves watching for
+the control key release from within Emacs itself.  Unfortunately, this approach
+cannot work because <a href="https://emacs.stackexchange.com/questions/10468/why-doesnt-emacs-support-key-up-down-events">Emacs cannot detect key
+releases</a>.</p>
+<p>My solution is to watch for the control key release at the macOS level, and then
+send a synthetic &quot;return&quot; key stroke.  This uses
+<a href="https://www.hammerspoon.org/">Hammerspoon</a>, which is &quot;a bridge between the
+operating system and a Lua scripting engine&quot;.  The downside to this approach is
+that it requires giving Hammerspoon permissions to the macOS accessibility
+stack, which comes with security risks.</p>
+<p>(Aside: I initially tried using
+<a href="https://karabiner-elements.pqrs.org/">Karabiner-Elements</a>.  Ultimately, I
+couldn't get this to work because <a href="https://github.com/pqrs-org/Karabiner-Elements/issues/2281">there is no way to evaluate conditions on key
+up</a>.  Also, unlike
+Hammerspoon, Karabiner-Elements installs its own kernel extension.  I also much
+prefer Hammerspoon's approach of writing scripts in Lua over Karabiner-Element's
+json-embedded syntax.)</p>
+<p>Here's my <code>.hammerspoon/init.lua</code> script, which is the first Lua program that
+I've ever written:</p>
+<pre data-lang="lua" style="background-color:#2b303b;color:#c0c5ce;" class="language-lua "><code class="language-lua" data-lang="lua"><span style="color:#b48ead;">local </span><span style="color:#bf616a;">emacsKeyboardEventHandler
+</span><span style="color:#b48ead;">local </span><span style="color:#bf616a;">controlTabSeen
+</span><span>
+</span><span style="color:#65737e;">-- Watches for the release of the control key after one or more control-tab
+</span><span style="color:#65737e;">-- keystrokes, and sends a synthetic &#39;return&#39; keystroke.
+</span><span style="color:#b48ead;">local function </span><span style="color:#8fa1b3;">keyboardEventHandler</span><span>(event)
+</span><span>    </span><span style="color:#b48ead;">local </span><span style="color:#bf616a;">flags </span><span>= </span><span style="color:#bf616a;">event</span><span>:</span><span style="color:#bf616a;">getFlags</span><span>()
+</span><span>    </span><span style="color:#b48ead;">local </span><span style="color:#bf616a;">eventType </span><span>= </span><span style="color:#bf616a;">event</span><span>:</span><span style="color:#bf616a;">getType</span><span>()
+</span><span>    </span><span style="color:#b48ead;">local </span><span style="color:#bf616a;">keyCode </span><span>= </span><span style="color:#bf616a;">event</span><span>:</span><span style="color:#bf616a;">getKeyCode</span><span>()
+</span><span>
+</span><span>    </span><span style="color:#b48ead;">if </span><span style="color:#bf616a;">flags</span><span>.ctrl and </span><span style="color:#bf616a;">eventType </span><span>== </span><span style="color:#bf616a;">hs</span><span>.eventtap.event.types.keyDown and </span><span style="color:#bf616a;">keyCode </span><span>== </span><span style="color:#d08770;">48 </span><span style="color:#b48ead;">then
+</span><span>        </span><span style="color:#bf616a;">controlTabSeen </span><span>= </span><span style="color:#d08770;">true
+</span><span>    </span><span style="color:#b48ead;">elseif </span><span>not </span><span style="color:#bf616a;">flags</span><span>.ctrl and </span><span style="color:#bf616a;">controlTabSeen </span><span style="color:#b48ead;">then
+</span><span>        </span><span style="color:#bf616a;">controlTabSeen </span><span>= </span><span style="color:#d08770;">false
+</span><span>        </span><span style="color:#bf616a;">hs</span><span>.eventtap.</span><span style="color:#bf616a;">keyStroke</span><span>({}, &quot;</span><span style="color:#a3be8c;">return</span><span>&quot;)
+</span><span>    </span><span style="color:#b48ead;">end
+</span><span>
+</span><span>    </span><span style="color:#b48ead;">return </span><span style="color:#d08770;">false
+</span><span style="color:#b48ead;">end
+</span><span>
+</span><span style="color:#65737e;">-- Runs the keyboardEventHandler only when Emacs is activated.
+</span><span style="color:#b48ead;">local function </span><span style="color:#8fa1b3;">appEventHandler</span><span>(appName, eventType)
+</span><span>    </span><span style="color:#b48ead;">if </span><span style="color:#bf616a;">appName </span><span>~= &quot;</span><span style="color:#a3be8c;">Emacs</span><span>&quot; </span><span style="color:#b48ead;">then return end
+</span><span>    </span><span style="color:#b48ead;">if </span><span style="color:#bf616a;">eventType </span><span>== </span><span style="color:#bf616a;">hs</span><span>.application.watcher.activated and not </span><span style="color:#bf616a;">emacsKeyboardEventHandler </span><span style="color:#b48ead;">then
+</span><span>        </span><span style="color:#bf616a;">controlTabSeen </span><span>= </span><span style="color:#d08770;">false
+</span><span>        </span><span style="color:#bf616a;">emacsKeyboardEventHandler </span><span>= </span><span style="color:#bf616a;">hs</span><span>.eventtap.</span><span style="color:#bf616a;">new</span><span>({
+</span><span>            </span><span style="color:#bf616a;">hs</span><span>.eventtap.event.types.keyDown, </span><span style="color:#bf616a;">hs</span><span>.eventtap.event.types.flagsChanged
+</span><span>        }, </span><span style="color:#bf616a;">keyboardEventHandler</span><span>)
+</span><span>        </span><span style="color:#bf616a;">emacsKeyboardEventHandler</span><span>:</span><span style="color:#bf616a;">start</span><span>()
+</span><span>    </span><span style="color:#b48ead;">elseif </span><span style="color:#bf616a;">eventType </span><span>== </span><span style="color:#bf616a;">hs</span><span>.application.watcher.deactivated and </span><span style="color:#bf616a;">emacsKeyboardEventHandler </span><span style="color:#b48ead;">then
+</span><span>        </span><span style="color:#bf616a;">emacsKeyboardEventHandler</span><span>:</span><span style="color:#bf616a;">stop</span><span>()
+</span><span>        </span><span style="color:#bf616a;">emacsKeyboardEventHandler </span><span>= </span><span style="color:#d08770;">nil
+</span><span>    </span><span style="color:#b48ead;">end
+</span><span style="color:#b48ead;">end
+</span><span>
+</span><span style="color:#bf616a;">appWatcher </span><span>= </span><span style="color:#bf616a;">hs</span><span>.application.watcher.</span><span style="color:#bf616a;">new</span><span>(</span><span style="color:#bf616a;">appEventHandler</span><span>):</span><span style="color:#bf616a;">start</span><span>()
+</span></code></pre>
+<p>For completeness, here's the relevant section of my Emacs <code>config.el</code>:</p>
+<pre data-lang="lisp" style="background-color:#2b303b;color:#c0c5ce;" class="language-lisp "><code class="language-lisp" data-lang="lisp"><span>(after!
+</span><span>  (:and helm helm-icons)
+</span><span>  (define-key helm-</span><span style="color:#96b5b4;">map </span><span>(kbd &quot;</span><span style="color:#a3be8c;">&lt;C-tab&gt;</span><span>&quot;) </span><span style="color:#d08770;">#&#39;helm-next-line</span><span>)
+</span><span>  (define-key helm-</span><span style="color:#96b5b4;">map </span><span>(kbd &quot;</span><span style="color:#a3be8c;">&lt;C-S-tab&gt;</span><span>&quot;) </span><span style="color:#d08770;">#&#39;helm-previous-line</span><span>)
+</span><span>)
+</span><span>(global-</span><span style="color:#96b5b4;">set</span><span>-key (kbd &quot;</span><span style="color:#a3be8c;">&lt;C-tab&gt;</span><span>&quot;) </span><span style="color:#d08770;">#&#39;helm-multi-files</span><span>)
+</span></code></pre>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date"> 4 February 2024</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
