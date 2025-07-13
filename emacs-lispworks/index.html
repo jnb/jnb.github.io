@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Using LispWorks Personal Edition from Emacs</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Using LispWorks Personal Edition from Emacs</h1>
+    </header>
+    <div class="content">
+        <p>For reasons, I wanted to try creating a Cocoa window from Lisp.  The
+ridiculously easy way to do this is to just use LispWorks; I installed the
+LispWorks Personal Edition to try this out.  But then of course we want to talk
+to LispWorks using Emacs <a href="https://github.com/joaotavora/sly">sly-mode</a>, and it's
+not exactly documented anywhere how to do this for the Personal Edition.  So
+here's how to do it.</p>
+<span id="continue-reading"></span>
+<p>Add this to your <code>.slynkrc</code> so that IO redirection occurs when using
+<code>sly-connect</code> (normally this only happens with <code>M-x sly</code>):</p>
+<pre data-lang="lisp" style="background-color:#2b303b;color:#c0c5ce;" class="language-lisp "><code class="language-lisp" data-lang="lisp"><span>(</span><span style="color:#96b5b4;">setf</span><span> slynk:*</span><span style="color:#bf616a;">globally-redirect-io</span><span>* </span><span style="color:#d08770;">t</span><span>)
+</span></code></pre>
+<p>Startup LispWorks Personal Edition, and then enter the following into the LispWorks REPL:</p>
+<pre data-lang="lisp" style="background-color:#2b303b;color:#c0c5ce;" class="language-lisp "><code class="language-lisp" data-lang="lisp"><span>(</span><span style="color:#96b5b4;">load </span><span>&quot;</span><span style="color:#a3be8c;">~/quicklisp/setup.lisp</span><span>&quot;)
+</span><span>(ql:quickload :slynk)
+</span><span>(slynk:create-server :port </span><span style="color:#d08770;">4005</span><span> :dont-</span><span style="color:#96b5b4;">close </span><span style="color:#d08770;">t</span><span>)
+</span></code></pre>
+<p>Now, from Emacs:</p>
+<pre style="background-color:#2b303b;color:#c0c5ce;"><code><span>M-x sly-connect
+</span></code></pre>
+<p>Finally, to check that it's working, evaluate the following: </p>
+<pre data-lang="lisp" style="background-color:#2b303b;color:#c0c5ce;" class="language-lisp "><code class="language-lisp" data-lang="lisp"><span>(capi:display
+</span><span> (</span><span style="color:#96b5b4;">make-instance
+</span><span>  &#39;capi:interface
+</span><span>  :visible-min-width </span><span style="color:#d08770;">200
+</span><span>  :title &quot;</span><span style="color:#a3be8c;">Hello world</span><span>&quot;))
+</span></code></pre>
+<p>Easy!</p>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date">13 July 2025</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
