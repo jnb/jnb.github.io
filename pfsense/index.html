@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>On a non-routing pfSense WAN connection after a power failure</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>On a non-routing pfSense WAN connection after a power failure</h1>
+    </header>
+    <div class="content">
+        <p><em>2024-03-29 update</em>: As of 23.09.1-RELEASE, the underlying issue appears to be
+fixed.</p>
+<p>After a power-failure, my pfSense router (running 23.05.1-RELEASE) often
+fails to route packets over its single Starlink WAN connection.
+This is tedious because (i) power failures are relatively common around here,
+and (ii) the pfSense router is somewhat inaccessible.
+Wouldn't it be nice if everything &quot;just worked&quot; when the power came back on?</p>
+<span id="continue-reading"></span>
+<p>My guess was that this is something related to the pfSense router coming up
+before the Starlink router has established a connection;
+when this happens, the Starlink Gateway entry on the front page of the pfSense
+web UI often shows a status of &quot;Unknown&quot;,
+and doing a reboot of the pfSense router (without rebooting the Starlink router)
+fixes the problem.</p>
+<p>Searching around, I found the open pfSense issue
+<a href="https://redmine.pfsense.org/issues/11570">#11570</a>,
+which seem to talking about the same problem.
+Until this is resolved, here's how I fixed the issue:</p>
+<ul>
+<li>Go to &quot;System -&gt; Routing&quot;, edit &quot;WAN_DHCP&quot; / &quot;WAN_DHCP6&quot;, and
+check &quot;Disable Gateway Monitoring&quot;.</li>
+</ul>
+<p>Here's what else I tried when attempting to fix the issue,
+and which DOESN'T help:</p>
+<ul>
+<li>Go to &quot;System -&gt; Routing&quot;, edit &quot;WAN_DHCP&quot; / &quot;WAN_DHCP6&quot;, and
+check &quot;Disable Gateway Monitoring Action&quot;.</li>
+<li>Go to &quot;System -&gt; Routing&quot;
+and set &quot;Default gateway IPv4&quot; / &quot;Default gateway IPv6&quot;
+to &quot;WAN_DHCP&quot; / &quot;WAN_DHCP6&quot;.</li>
+</ul>
+<p>Here's what TEMPORARILY fixes the issue i.e. without rebooting the pfSense
+router:</p>
+<ul>
+<li>Go to &quot;System -&gt; Routing&quot;, click &quot;Save&quot; (without making any changes),
+and then click &quot;Apply Changes&quot;.</li>
+</ul>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date">30 September 2023</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

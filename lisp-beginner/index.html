@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Experiences as a Lisp beginner</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Experiences as a Lisp beginner</h1>
+    </header>
+    <div class="content">
+        <p>I just spent a couple of weeks on-and-off writing some Lisp.  I'm probably going
+to take a break from this for a bit to focus elsewhere; these are some of my
+thoughts as a relative beginner while they're still fresh in my mind.  There are
+going to be some inaccuracies here, reader beware etc.</p>
+<span id="continue-reading"></span>
+<p>What did I get done?  I wrote enough wgpu bindings to get a colored pane in a
+macOS window, and added some LispWorks CAPI widgets:</p>
+<p><img src="lisp-gui.png" width="500" alt="Screenshot of a Lisp GUI window"></p>
+<p>This ended up being only about 800 lines of code, although I perhaps wrote
+several times that amount while iterating?  About half of this code was raw cffi
+bindings to wgpu-native.  I did not write a lot of data-structure heavy code.</p>
+<p>The good parts:</p>
+<ul>
+<li>I really enjoyed being able to live-update code.  Hitting 'C-c C-c' in Emacs
+to compile and replace the current top-level definition felt pretty magical.
+My closest experience to this prior to writing Lisp has been using JavaScript
+Hot Module Reloading.</li>
+<li>I started to get the appeal of structural editing.  It took me some sustained
+effort to configure and internalize the smartparens key bindings, but it was
+definitely worth it.  Using structural editing, parenthesis mismatches mostly
+became a non-problem.</li>
+<li>I started to get the appeal of macros.  I was able to write a handful of
+<code>with-</code> macros to ensure proper resource management of command buffers,
+command encoders etc, and have it look completely seamless (vs. passing
+closures around).  Not life-changing, but definitely nice to have.  In
+comparison, writing Rust procedural macros requires a <em>lot</em> more work, so I
+only reach for them when there's a large benefit.</li>
+<li>In terms of learning resources, I found the <a href="https://lispcookbook.github.io/cl-cookbook/">The Common Lisp
+Cookbook</a> to be useful, as well
+as Peter Seibel's <a href="https://gigamonkeys.com/book/">Practical Common Lisp</a>.
+LLMs were also able to answer most of my basic questions.</li>
+<li>QuickLisp worked well for installing the handful of libraries that I used.  It
+doesn't have Cargo's semantic versioning or feature flags, but it did what I
+needed it to do.</li>
+</ul>
+<p>The bad parts:</p>
+<ul>
+<li>There just aren't a lot of blog posts on Lisp.  Writing Rust over the past few
+years, I've been spoiled by the number of &quot;here's an interesting that I found
+while writing some Rust&quot; blog posts; I find that these are great way of
+understanding how others solve problems in the language.  Perhaps part of the
+problem is that Lisp came of age before the Internet as we know it?</li>
+<li>Even companies selling Lisp don't seem to produce much in the way of learning
+material?  Seriously, LispWorks CAPI offers a portable GUI toolkit that
+abstracts over Windows, Cocoa, GTK+ (and Motif).  Being able to dynamically
+update a native GUI while you're working on it is the dream!  But all I could
+find was an 1100 page manual (of which about 200 pages is not API reference
+material) and a good-but-not-great amount of signup-gated demo code.
+Searching GitHub, I found very little code actually using CAPI.</li>
+<li>In my very limited amount of searching, I didn't come across any libraries in
+&quot;active development&quot;; every library was either &quot;done&quot; or abandoned.  That
+said, the done libraries seemed to work well?  And I definitely re-calibrated
+my expectations about what recent activity looked like e.g. I came to see it
+as a good sign when a library was updated in the past decade.</li>
+</ul>
+<p>Closing thoughts:</p>
+<ul>
+<li>I've again discovered that programming is just as much a social activity as a
+technical activity!  On raw technical power, I'd love to use Lisp, but I much
+prefer having Rust's community.  Or, to put it another way: I feel lonely when
+writing Lisp. (And this is said as someone who doesn't participate in any
+significant way in the Rust community.)</li>
+<li>Learning Lisp feels like a way to get in touch with a &quot;withered&quot; branch of
+computing history.  (Yes, there are still people writing Lisp today, but as a
+proportion of programmers they are in the vanishing minority).</li>
+<li>I find it remarkable that Common Lisp as we know it today is largely the same
+as the Common Lisp of the 1980s, and is exactly the same as the ANSI Common
+Lisp that was standardized in 1994.  There are likely people who are no longer
+with us who had entire careers writing Lisp, at least some of which would have
+been ANSI Common Lisp (C is somewhat similar, although the language is
+regularly revised).</li>
+</ul>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date">21 July 2025</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

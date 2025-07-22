@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Using wgpu with Electron on macOS</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Using wgpu with Electron on macOS</h1>
+    </header>
+    <div class="content">
+        <p>Here is a brief guide to adding a
+<a href="https://github.com/gfx-rs/wgpu">wgpu</a>-rendered underlay to an
+<a href="https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle">Electron</a>
+window on macOS.  Doing this isn't particularly difficult <em>once you know how</em>,
+but I couldn't find this information anywhere else.  So here's the guide that I
+wish had existed before I went down this path!</p>
+<span id="continue-reading"></span>
+<p>The overall approach is to let Electron &quot;run the show&quot;, invoking the Rust logic
+as a library, wrapped using <a href="https://napi.rs/">napi-rs</a>.  In Rust we add a
+subview, positioned underneath Electron's NSView.  From this subview we create a
+wgpu surface which we then pass to our own rendering thread.</p>
+<p>One key challenge is to support low-latency resizes of the wgpu surface so that
+the web UI and rendered content move in concert.  (If we didn't care about
+latency we could just write a JS resize handler that calls out to Rust on each
+resize operation).  We solve this problem by (i) setting reconfigurable
+constraints on the subview so that macOS resizes it whenever the main window is
+resized, and (ii) configuring the subview to directly send resize messages to
+our rendering thread which can then reconfigure the surface with the new
+dimensions.  (Surface reconfiguration must occur between frame renders, so it's
+easiest to do this in the rendering thread.)</p>
+<p>Caveat emptor: the code samples below are directly taken from an application
+that I'm working on, with some light editing for generality.  There may be some
+minor errors (e.g. missing imports, or mistranscribed names).</p>
+<h1 id="1-get-the-root-nsview">1. Get the root NSView</h1>
+<p>In our Electron main process, we create the browser window and pass the results
+of
+<a href="https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle">getNativeWindowHandle</a>
+to our initialization function:</p>
+<pre data-lang="js" style="background-color:#2b303b;color:#c0c5ce;" class="language-js "><code class="language-js" data-lang="js"><span style="color:#b48ead;">function </span><span style="color:#8fa1b3;">createWindow</span><span>() {
+</span><span>  </span><span style="color:#b48ead;">const </span><span style="color:#bf616a;">mainWindow </span><span>= new BrowserWindow({ </span><span style="color:#65737e;">/* ... */ </span><span>});
+</span><span>  </span><span style="color:#bf616a;">myrustlib</span><span>.</span><span style="color:#8fa1b3;">init</span><span>(
+</span><span>    </span><span style="color:#bf616a;">mainWindow</span><span>.</span><span style="color:#8fa1b3;">getNativeWindowHandle</span><span>(),
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>  );
+</span><span>
+</span><span>  </span><span style="color:#65737e;">// Set transparent background so that underlay is visible
+</span><span>  </span><span style="color:#bf616a;">mainWindow</span><span>.</span><span style="color:#8fa1b3;">setBackgroundColor</span><span>(&#39;</span><span style="color:#a3be8c;">#00000000</span><span>&#39;);
+</span><span>}
+</span></code></pre>
+<p>In our Rust initialization function, we convert the native window handle Buffer
+to the root <code>NSView</code> (also know as the &quot;content view&quot;):</p>
+<pre data-lang="rust" style="background-color:#2b303b;color:#c0c5ce;" class="language-rust "><code class="language-rust" data-lang="rust"><span style="color:#b48ead;">use </span><span>napi::bindgen_prelude::Buffer;
+</span><span style="color:#b48ead;">use </span><span>napi_derive::napi;
+</span><span style="color:#b48ead;">use </span><span>objc2::rc::Retained;
+</span><span style="color:#b48ead;">use </span><span>objc2_app_kit::NSView;
+</span><span>
+</span><span>#[</span><span style="color:#bf616a;">napi</span><span>]
+</span><span style="color:#b48ead;">pub fn </span><span style="color:#8fa1b3;">init</span><span>(</span><span style="color:#bf616a;">content_view</span><span>: Buffer) -&gt; Result&lt;(), napi::Error&gt; {
+</span><span>    </span><span style="color:#96b5b4;">init_inner</span><span>(content_view).</span><span style="color:#96b5b4;">map_err</span><span>(|</span><span style="color:#bf616a;">e</span><span>| napi::Error::from_reason(e.</span><span style="color:#96b5b4;">to_string</span><span>()))
+</span><span>}
+</span><span>
+</span><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">init_inner</span><span>(</span><span style="color:#bf616a;">content_view</span><span>: Buffer) -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
+</span><span>    </span><span style="color:#b48ead;">let</span><span> content_view = content_view.</span><span style="color:#96b5b4;">to_vec</span><span>();
+</span><span>    </span><span style="color:#b48ead;">let</span><span> content_view = </span><span style="color:#b48ead;">u64</span><span>::from_le_bytes(content_view[..</span><span style="color:#d08770;">8</span><span>].</span><span style="color:#96b5b4;">try_into</span><span>()?);
+</span><span>    </span><span style="color:#b48ead;">let</span><span> content_view = content_view as </span><span style="color:#b48ead;">*mut </span><span>std::ffi::</span><span style="color:#b48ead;">c_void</span><span>;
+</span><span>    </span><span style="color:#b48ead;">let</span><span> content_view: Retained&lt;NSView&gt; = 
+</span><span>        </span><span style="color:#b48ead;">unsafe </span><span>{ Retained::retain(content_view.</span><span style="color:#96b5b4;">cast</span><span>()).</span><span style="color:#96b5b4;">unwrap</span><span>() }
+</span><span>}
+</span></code></pre>
+<h1 id="2-define-our-subview">2. Define our subview</h1>
+<p>We now define a subclass of NSView that sends resize notifications over a
+channel, and otherwise behaves identically to a standard NSView.  We'll send
+these notifications to our rendering thread, which can then reconfigure the
+surface dimensions.</p>
+<pre data-lang="rust" style="background-color:#2b303b;color:#c0c5ce;" class="language-rust "><code class="language-rust" data-lang="rust"><span style="color:#b48ead;">use </span><span>std::sync::mpsc;
+</span><span style="color:#b48ead;">use </span><span>std::sync::OnceLock;
+</span><span>
+</span><span style="color:#b48ead;">use </span><span>objc2::define_class;
+</span><span style="color:#b48ead;">use </span><span>objc2::msg_send;
+</span><span style="color:#b48ead;">use </span><span>objc2::rc::Allocated;
+</span><span style="color:#b48ead;">use </span><span>objc2::DefinedClass as _;
+</span><span style="color:#b48ead;">use </span><span>objc2_foundation::NSSize;
+</span><span>
+</span><span>#[</span><span style="color:#bf616a;">derive</span><span>(Debug)]
+</span><span style="color:#b48ead;">pub enum </span><span>MyMessage {
+</span><span>    Resized {
+</span><span>        width: </span><span style="color:#b48ead;">u32</span><span>,
+</span><span>        height: </span><span style="color:#b48ead;">u32</span><span>,
+</span><span>    },
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>}
+</span><span>
+</span><span>define_class!(
+</span><span>    #[</span><span style="color:#bf616a;">unsafe</span><span>(</span><span style="color:#bf616a;">super</span><span>(NSView))]
+</span><span>    #[</span><span style="color:#bf616a;">ivars </span><span>= </span><span style="color:#bf616a;">Ivars</span><span>]
+</span><span>    #[</span><span style="color:#bf616a;">name </span><span>= &quot;</span><span style="color:#a3be8c;">MyNSView</span><span>&quot;]
+</span><span>    </span><span style="color:#b48ead;">pub struct </span><span>MyNSView;
+</span><span>
+</span><span>    </span><span style="color:#b48ead;">impl </span><span>MyNSView {
+</span><span>        #[</span><span style="color:#bf616a;">unsafe</span><span>(</span><span style="color:#bf616a;">method_id</span><span>(init))]
+</span><span>        </span><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">_init</span><span>(</span><span style="color:#bf616a;">this</span><span>: Allocated&lt;</span><span style="color:#b48ead;">Self</span><span>&gt;) -&gt; Retained&lt;</span><span style="color:#b48ead;">Self</span><span>&gt; {
+</span><span>            </span><span style="color:#b48ead;">let</span><span> this = this.</span><span style="color:#96b5b4;">set_ivars</span><span>(Ivars::default());
+</span><span>            </span><span style="color:#b48ead;">unsafe </span><span>{ msg_send![</span><span style="color:#96b5b4;">super</span><span>(this), init] }
+</span><span>        }
+</span><span>
+</span><span>        #[</span><span style="color:#bf616a;">unsafe</span><span>(</span><span style="color:#bf616a;">method</span><span>(setFrameSize:))]
+</span><span>        </span><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">set_frame_size</span><span>(&amp;</span><span style="color:#bf616a;">self</span><span>, </span><span style="color:#bf616a;">size</span><span>: NSSize) {
+</span><span>            </span><span style="color:#b48ead;">unsafe </span><span>{ msg_send![</span><span style="color:#96b5b4;">super</span><span>(</span><span style="color:#bf616a;">self</span><span>), setFrameSize: size] }
+</span><span>            </span><span style="color:#bf616a;">self</span><span>.</span><span style="color:#96b5b4;">ivars</span><span>().tx.</span><span style="color:#96b5b4;">get</span><span>().</span><span style="color:#96b5b4;">unwrap</span><span>().</span><span style="color:#96b5b4;">send</span><span>(MyMessage::Resized {
+</span><span>                width: size.width as </span><span style="color:#b48ead;">u32</span><span>,
+</span><span>                height: size.height as </span><span style="color:#b48ead;">u32</span><span>,
+</span><span>            })
+</span><span>            .</span><span style="color:#96b5b4;">unwrap</span><span>();
+</span><span>        }
+</span><span>    }
+</span><span>);
+</span><span>
+</span><span>#[</span><span style="color:#bf616a;">derive</span><span>(Default)]
+</span><span style="color:#b48ead;">pub struct </span><span>Ivars {
+</span><span>    </span><span style="color:#bf616a;">tx</span><span>: OnceLock&lt;mpsc::Sender&lt;MyMessage&gt;&gt;,
+</span><span>}
+</span><span>
+</span><span style="color:#b48ead;">impl </span><span>MyNSView {
+</span><span>    </span><span style="color:#b48ead;">pub fn </span><span style="color:#8fa1b3;">init</span><span>(</span><span style="color:#bf616a;">this</span><span>: Allocated&lt;</span><span style="color:#b48ead;">Self</span><span>&gt;, </span><span style="color:#bf616a;">tx</span><span>: mpsc::Sender&lt;MyMessage&gt;) -&gt; Retained&lt;</span><span style="color:#b48ead;">Self</span><span>&gt; {
+</span><span>        </span><span style="color:#b48ead;">let</span><span> this: Retained&lt;</span><span style="color:#b48ead;">Self</span><span>&gt; = </span><span style="color:#b48ead;">unsafe </span><span>{ msg_send![this, init] };
+</span><span>        this.</span><span style="color:#96b5b4;">ivars</span><span>()
+</span><span>            .tx
+</span><span>            .</span><span style="color:#96b5b4;">set</span><span>(tx)
+</span><span>            .</span><span style="color:#96b5b4;">unwrap</span><span>();
+</span><span>        this
+</span><span>    }
+</span><span>}
+</span></code></pre>
+<h1 id="3-create-our-subview">3. Create our subview</h1>
+<p>Next we create the subview and add it to the content view:</p>
+<pre data-lang="rust" style="background-color:#2b303b;color:#c0c5ce;" class="language-rust "><code class="language-rust" data-lang="rust"><span style="color:#b48ead;">use </span><span>objc2_foundation::MainThreadMarker;
+</span><span>
+</span><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">init_inner</span><span>(</span><span style="color:#bf616a;">content_view</span><span>: Buffer) -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>    </span><span style="color:#b48ead;">let</span><span> mtm = </span><span style="color:#b48ead;">unsafe </span><span>{ MainThreadMarker::new_unchecked() };
+</span><span>    </span><span style="color:#b48ead;">let</span><span> my_view: Allocated&lt;MyNSView&gt; = mtm.</span><span style="color:#96b5b4;">alloc</span><span>();
+</span><span>    </span><span style="color:#b48ead;">let </span><span>(tx, rx) = mpsc::channel::&lt;MyMessage&gt;();
+</span><span>    </span><span style="color:#b48ead;">let</span><span> my_view = MyNSView::init(my_view, tx.</span><span style="color:#96b5b4;">clone</span><span>());
+</span><span>    
+</span><span>    </span><span style="color:#b48ead;">unsafe </span><span>{
+</span><span>        content_view.addSubview_positioned_relativeTo(
+</span><span>            &amp;my_view,
+</span><span>            objc2_app_kit::NSWindowOrderingMode::Below,
+</span><span>            None,
+</span><span>        );
+</span><span>    }
+</span><span>}
+</span></code></pre>
+<h1 id="4-set-constraints-on-our-subview">4. Set constraints on our subview</h1>
+<p>Next we set constraints on our subview so that macOS resizes it as the content
+view resizes.  You can also expose a Rust function (not shown) to alter the
+<a href="https://developer.apple.com/documentation/uikit/nslayoutconstraint/constant">constants</a>
+from JS.</p>
+<pre data-lang="rust" style="background-color:#2b303b;color:#c0c5ce;" class="language-rust "><code class="language-rust" data-lang="rust"><span style="color:#b48ead;">use </span><span>objc2_app_kit::NSLayoutAttribute;
+</span><span style="color:#b48ead;">use </span><span>objc2_app_kit::NSLayoutConstraint;
+</span><span style="color:#b48ead;">use </span><span>objc2_app_kit::NSLayoutPriorityDefaultLow;
+</span><span style="color:#b48ead;">use </span><span>objc2_app_kit::NSLayoutRelation;
+</span><span>
+</span><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">init_inner</span><span>(</span><span style="color:#bf616a;">content_view</span><span>: Buffer) -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>    </span><span style="color:#b48ead;">unsafe </span><span>{
+</span><span>        my_view.setTranslatesAutoresizingMaskIntoConstraints(</span><span style="color:#d08770;">false</span><span>);
+</span><span>    }
+</span><span>
+</span><span>    </span><span style="color:#b48ead;">let</span><span> top_constraint = </span><span style="color:#b48ead;">unsafe </span><span>{
+</span><span>        NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(
+</span><span>            &amp;my_view,
+</span><span>            NSLayoutAttribute::Top,
+</span><span>            NSLayoutRelation::Equal,
+</span><span>            Some(&amp;content_view),
+</span><span>            NSLayoutAttribute::Top,
+</span><span>            </span><span style="color:#d08770;">1.0</span><span>,  </span><span style="color:#65737e;">// Multiplier
+</span><span>            </span><span style="color:#d08770;">0.0</span><span>,  </span><span style="color:#65737e;">// Constant 
+</span><span>        )
+</span><span>    };
+</span><span>    </span><span style="color:#b48ead;">unsafe </span><span>{ top_constraint.setPriority(NSLayoutPriorityDefaultLow) }
+</span><span>    </span><span style="color:#b48ead;">unsafe </span><span>{ content_view.addConstraint(&amp;top_constraint) }
+</span><span>    
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>}
+</span></code></pre>
+<h1 id="5-create-the-wgpu-surface">5. Create the wgpu surface</h1>
+<p>Next we create the wgpu surface from the subview.  Note that we must create (and
+drop) this surface in the main thread.</p>
+<pre data-lang="rust" style="background-color:#2b303b;color:#c0c5ce;" class="language-rust "><code class="language-rust" data-lang="rust"><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">init_inner</span><span>(</span><span style="color:#bf616a;">content_view</span><span>: Buffer) -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>    </span><span style="color:#b48ead;">let</span><span> instance = wgpu::Instance::default();
+</span><span>    </span><span style="color:#b48ead;">let</span><span> raw_display_handle = raw_window_handle::RawDisplayHandle::AppKit(
+</span><span>        raw_window_handle::AppKitDisplayHandle::new(),
+</span><span>    );
+</span><span>    </span><span style="color:#b48ead;">let</span><span> raw_window_handle =
+</span><span>        raw_window_handle::RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(
+</span><span>            std::ptr::NonNull::new(Retained::as_ptr(&amp;video_view).</span><span style="color:#96b5b4;">cast_mut</span><span>() as </span><span style="color:#b48ead;">*mut </span><span>_)
+</span><span>                .</span><span style="color:#96b5b4;">expect</span><span>(&quot;</span><span style="color:#a3be8c;">overlay should be non-null</span><span>&quot;),
+</span><span>        ));
+</span><span>    </span><span style="color:#b48ead;">let</span><span> surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
+</span><span>        raw_display_handle,
+</span><span>        raw_window_handle,
+</span><span>    };
+</span><span>    </span><span style="color:#b48ead;">let</span><span> my_surface =
+</span><span>        </span><span style="color:#b48ead;">unsafe </span><span>{ instance.</span><span style="color:#96b5b4;">create_surface_unsafe</span><span>(surface_target)? };
+</span><span>}
+</span></code></pre>
+<h1 id="6-spawn-the-rendering-thread">6. Spawn the rendering thread</h1>
+<p>Finally we spawn our rendering thread, passing in the receive channel and
+surface.  It's useful to store the constraints, surface and join handle in some
+context structure (I used a thread-local variable, not shown).</p>
+<pre data-lang="rust" style="background-color:#2b303b;color:#c0c5ce;" class="language-rust "><code class="language-rust" data-lang="rust"><span style="color:#b48ead;">fn </span><span style="color:#8fa1b3;">init_inner</span><span>(</span><span style="color:#bf616a;">content_view</span><span>: Buffer) -&gt; Result&lt;(), Box&lt;dyn Error&gt;&gt; {
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>    </span><span style="color:#b48ead;">let mut</span><span> renderer = Renderer::new(rx, surface.</span><span style="color:#96b5b4;">clone</span><span>());
+</span><span>    </span><span style="color:#b48ead;">let</span><span> join_handle = thread::Builder::new()
+</span><span>        .</span><span style="color:#96b5b4;">name</span><span>(&quot;</span><span style="color:#a3be8c;">renderer</span><span>&quot;.</span><span style="color:#96b5b4;">into</span><span>())
+</span><span>        .</span><span style="color:#96b5b4;">spawn</span><span>(</span><span style="color:#b48ead;">move </span><span>|| renderer.</span><span style="color:#96b5b4;">run</span><span>())
+</span><span>        .</span><span style="color:#96b5b4;">unwrap</span><span>();
+</span><span>    </span><span style="color:#65737e;">// ...
+</span><span>}
+</span></code></pre>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date"> 6 March 2025</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
