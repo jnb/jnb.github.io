@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Using LispWorks Personal Edition from Emacs</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Using LispWorks Personal Edition from Emacs</h1>
+    </header>
+    <div class="content">
+        <p>For reasons, I wanted to try creating a Cocoa window from Lisp.  The
+ridiculously easy way to do this is to just use LispWorks; I installed the
+LispWorks Personal Edition to try this out.  But then of course we want to talk
+to LispWorks using Emacs <a rel="external" href="https://github.com/joaotavora/sly">sly-mode</a>, and it's
+not exactly documented anywhere how to do this for the Personal Edition.  So
+here's how to do it.</p>
+<span id="continue-reading"></span>
+<p>Add this to your <code>.slynkrc</code> so that IO redirection occurs when using
+<code>sly-connect</code> (normally this only happens with <code>M-x sly</code>):</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="common-lisp"><span class="giallo-l"><span>(</span><span style="color: #81A1C1;">setf</span><span style="color: #8FBCBB;"> slynk</span><span>:</span><span style="color: #EBCB8B;">*globally-redirect-io*</span><span style="color: #81A1C1;"> t</span><span>)</span></span></code></pre>
+<p>Startup LispWorks Personal Edition, and then enter the following into the LispWorks REPL:</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="common-lisp"><span class="giallo-l"><span>(</span><span style="color: #88C0D0;">load</span><span style="color: #ECEFF4;"> &quot;</span><span style="color: #A3BE8C;">~/quicklisp/setup.lisp</span><span style="color: #ECEFF4;">&quot;</span><span>)</span></span>
+<span class="giallo-l"><span>(</span><span style="color: #8FBCBB;">ql</span><span>:quickload :slynk)</span></span>
+<span class="giallo-l"><span>(</span><span style="color: #8FBCBB;">slynk</span><span>:create-server :port</span><span style="color: #B48EAD;"> 4005</span><span> :dont-close</span><span style="color: #81A1C1;"> t</span><span>)</span></span></code></pre>
+<p>Now, from Emacs:</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="plain"><span class="giallo-l"><span>M-x sly-connect</span></span></code></pre>
+<p>Finally, to check that it's working, evaluate the following:</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="common-lisp"><span class="giallo-l"><span>(</span><span style="color: #8FBCBB;">capi</span><span>:display</span></span>
+<span class="giallo-l"><span> (</span><span style="color: #88C0D0;">make-instance</span></span>
+<span class="giallo-l"><span>  &#39;capi:interface</span></span>
+<span class="giallo-l"><span>  :visible-min-width</span><span style="color: #B48EAD;"> 200</span></span>
+<span class="giallo-l"><span>  :title</span><span style="color: #ECEFF4;"> &quot;</span><span style="color: #A3BE8C;">Hello world</span><span style="color: #ECEFF4;">&quot;</span><span>))</span></span></code></pre>
+<p>Easy!</p>
+
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date">13 July 2025</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>

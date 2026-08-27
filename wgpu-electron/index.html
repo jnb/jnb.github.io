@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="HandheldFriendly" content="True">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+
+    <title>Using wgpu with Electron on macOS</title>
+    <meta name="description" content="">
+
+    <link rel="stylesheet" href="https://www.monkeynut.org/main.css">
+
+    
+
+    
+    
+</head>
+<body>
+    <a class="skip-main" href="#main">Skip to content</a>
+    <div class="container">
+        <header> 
+            <h1 class="site-header">
+                <a href="https:&#x2F;&#x2F;www.monkeynut.org">monkeynut.org</a>
+            </h1>
+            <nav>
+                
+                
+                
+                <a  href="https:&#x2F;&#x2F;www.monkeynut.org&#x2F;about&#x2F;">About</a>
+                
+                
+            </nav>
+        </header>
+        <main id="main" tabindex="-1">
+            
+
+<article class="post">
+    <header>
+        <h1>Using wgpu with Electron on macOS</h1>
+    </header>
+    <div class="content">
+        <p>Here is a brief guide to adding a
+<a rel="external" href="https://github.com/gfx-rs/wgpu">wgpu</a>-rendered underlay to an
+<a rel="external" href="https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle">Electron</a>
+window on macOS.  Doing this isn't particularly difficult <em>once you know how</em>,
+but I couldn't find this information anywhere else.  So here's the guide that I
+wish had existed before I went down this path!</p>
+<span id="continue-reading"></span>
+<p><em>2026-08-27 update</em>: A high-level write-up of this approach is on Murlet's blog:
+<a rel="external" href="https://murlet.com/blog/rendering-wgpu-under-electron/">Zero-copy wgpu rendering inside an Electron app</a>.</p>
+<p>The overall approach is to let Electron "run the show", invoking the Rust logic
+as a library, wrapped using <a rel="external" href="https://napi.rs/">napi-rs</a>.  In Rust we add a
+subview, positioned underneath Electron's NSView.  From this subview we create a
+wgpu surface which we then pass to our own rendering thread.</p>
+<p>One key challenge is to support low-latency resizes of the wgpu surface so that
+the web UI and rendered content move in concert.  (If we didn't care about
+latency we could just write a JS resize handler that calls out to Rust on each
+resize operation).  We solve this problem by (i) setting reconfigurable
+constraints on the subview so that macOS resizes it whenever the main window is
+resized, and (ii) configuring the subview to directly send resize messages to
+our rendering thread which can then reconfigure the surface with the new
+dimensions.  (Surface reconfiguration must occur between frame renders, so it's
+easiest to do this in the rendering thread.)</p>
+<p>Caveat emptor: the code samples below are directly taken from an application
+that I'm working on, with some light editing for generality.  There may be some
+minor errors (e.g. missing imports, or mistranscribed names).</p>
+<h1 id="1-get-the-root-nsview">1. Get the root NSView</h1>
+<p>In our Electron main process, we create the browser window and pass the results
+of
+<a rel="external" href="https://www.electronjs.org/docs/latest/api/browser-window#wingetnativewindowhandle">getNativeWindowHandle</a>
+to our initialization function:</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="javascript"><span class="giallo-l"><span style="color: #81A1C1;">function</span><span style="color: #88C0D0;"> createWindow</span><span style="color: #ECEFF4;">() {</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">  const</span><span> mainWindow</span><span style="color: #81A1C1;"> = new</span><span style="color: #88C0D0;"> BrowserWindow</span><span>(</span><span style="color: #ECEFF4;">{</span><span style="color: #616E88;"> /* ... */</span><span style="color: #ECEFF4;"> }</span><span>)</span><span style="color: #81A1C1;">;</span></span>
+<span class="giallo-l"><span>  myrustlib</span><span style="color: #ECEFF4;">.</span><span style="color: #88C0D0;">init</span><span>(</span></span>
+<span class="giallo-l"><span>    mainWindow</span><span style="color: #ECEFF4;">.</span><span style="color: #88C0D0;">getNativeWindowHandle</span><span>()</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span>  )</span><span style="color: #81A1C1;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #616E88;">  // Set transparent background so that underlay is visible</span></span>
+<span class="giallo-l"><span>  mainWindow</span><span style="color: #ECEFF4;">.</span><span style="color: #88C0D0;">setBackgroundColor</span><span>(</span><span style="color: #ECEFF4;">&#39;</span><span style="color: #A3BE8C;">#00000000</span><span style="color: #ECEFF4;">&#39;</span><span>)</span><span style="color: #81A1C1;">;</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre>
+<p>In our Rust initialization function, we convert the native window handle Buffer
+to the root <code>NSView</code> (also know as the "content view"):</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="rust"><span class="giallo-l"><span style="color: #81A1C1;">use</span><span> napi</span><span style="color: #81A1C1;">::</span><span>bindgen_prelude</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Buffer</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> napi_derive</span><span style="color: #81A1C1;">::</span><span>napi</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2</span><span style="color: #81A1C1;">::</span><span>rc</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Retained</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_app_kit</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">NSView</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #5E81AC;">#[napi]</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">pub fn</span><span style="color: #88C0D0;"> init</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Buffer</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Result</span><span style="color: #ECEFF4;">&lt;(),</span><span> napi</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Error</span><span style="color: #ECEFF4;">&gt; {</span></span>
+<span class="giallo-l"><span style="color: #88C0D0;">    init_inner</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">map_err</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">|</span><span>e</span><span style="color: #81A1C1;">|</span><span> napi</span><span style="color: #81A1C1;">::</span><span>Error</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">from_reason</span><span style="color: #ECEFF4;">(</span><span>e</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">to_string</span><span style="color: #ECEFF4;">()))</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">fn</span><span style="color: #88C0D0;"> init_inner</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Buffer</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Result</span><span style="color: #ECEFF4;">&lt;(),</span><span style="color: #8FBCBB;"> Box</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">dyn</span><span style="color: #8FBCBB;"> Error</span><span style="color: #ECEFF4;">&gt;&gt; {</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> content_view</span><span style="color: #81A1C1;"> =</span><span> content_view</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">to_vec</span><span style="color: #ECEFF4;">();</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> content_view</span><span style="color: #81A1C1;"> =</span><span style="color: #8FBCBB;"> u64</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">from_le_bytes</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #ECEFF4;">[</span><span style="color: #81A1C1;">..</span><span style="color: #B48EAD;">8</span><span style="color: #ECEFF4;">]</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">try_into</span><span style="color: #ECEFF4;">()</span><span style="color: #81A1C1;">?</span><span style="color: #ECEFF4;">);</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> content_view</span><span style="color: #81A1C1;"> =</span><span> content_view</span><span style="color: #81A1C1;"> as *mut</span><span> std</span><span style="color: #81A1C1;">::</span><span>ffi</span><span style="color: #81A1C1;">::</span><span>c_void</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Retained</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #8FBCBB;">NSView</span><span style="color: #ECEFF4;">&gt;</span><span style="color: #81A1C1;"> =</span><span> </span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        unsafe</span><span style="color: #ECEFF4;"> {</span><span style="color: #8FBCBB;"> Retained</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">retain</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">cast</span><span style="color: #ECEFF4;">())</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">unwrap</span><span style="color: #ECEFF4;">() }</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre><h1 id="2-define-our-subview">2. Define our subview</h1>
+<p>We now define a subclass of NSView that sends resize notifications over a
+channel, and otherwise behaves identically to a standard NSView.  We'll send
+these notifications to our rendering thread, which can then reconfigure the
+surface dimensions.</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="rust"><span class="giallo-l"><span style="color: #81A1C1;">use</span><span> std</span><span style="color: #81A1C1;">::</span><span>sync</span><span style="color: #81A1C1;">::</span><span>mpsc</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> std</span><span style="color: #81A1C1;">::</span><span>sync</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">OnceLock</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2</span><span style="color: #81A1C1;">::</span><span>define_class</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2</span><span style="color: #81A1C1;">::</span><span>msg_send</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2</span><span style="color: #81A1C1;">::</span><span>rc</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Allocated</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">DefinedClass</span><span style="color: #81A1C1;"> as</span><span> _</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_foundation</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">NSSize</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #5E81AC;">#[derive(</span><span style="color: #8FBCBB;">Debug</span><span style="color: #5E81AC;">)]</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">pub enum</span><span style="color: #8FBCBB;"> MyMessage</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span style="color: #8FBCBB;">    Resized</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span>        width</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> u32</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span>        height</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> u32</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    },</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #88C0D0;font-weight: bold;">define_class!</span><span style="color: #ECEFF4;">(</span></span>
+<span class="giallo-l"><span style="color: #5E81AC;">    #[</span><span style="color: #81A1C1;">unsafe</span><span style="color: #5E81AC;">(super(</span><span style="color: #8FBCBB;">NSView</span><span style="color: #5E81AC;">))]</span></span>
+<span class="giallo-l"><span style="color: #5E81AC;">    #[ivars =</span><span style="color: #8FBCBB;"> Ivars</span><span style="color: #5E81AC;">]</span></span>
+<span class="giallo-l"><span style="color: #5E81AC;">    #[name = &quot;</span><span style="color: #A3BE8C;">MyNSView</span><span style="color: #5E81AC;">&quot;]</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    pub struct</span><span style="color: #8FBCBB;"> MyNSView</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    impl</span><span style="color: #8FBCBB;"> MyNSView</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span style="color: #5E81AC;">        #[</span><span style="color: #81A1C1;">unsafe</span><span style="color: #5E81AC;">(method_id(init))]</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        fn</span><span style="color: #88C0D0;"> _init</span><span style="color: #ECEFF4;">(</span><span>this</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Allocated</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">Self</span><span style="color: #ECEFF4;">&gt;)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Retained</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">Self</span><span style="color: #ECEFF4;">&gt; {</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            let</span><span> this</span><span style="color: #81A1C1;"> =</span><span> this</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">set_ivars</span><span style="color: #ECEFF4;">(</span><span>Ivars</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">default</span><span style="color: #ECEFF4;">());</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            unsafe</span><span style="color: #ECEFF4;"> {</span><span style="color: #88C0D0;font-weight: bold;"> msg_send!</span><span style="color: #ECEFF4;">[</span><span style="color: #81A1C1;">super</span><span style="color: #ECEFF4;">(</span><span>this</span><span style="color: #ECEFF4;">),</span><span> init</span><span style="color: #ECEFF4;">] }</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">        }</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #5E81AC;">        #[</span><span style="color: #81A1C1;">unsafe</span><span style="color: #5E81AC;">(method(setFrameSize:))]</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        fn</span><span style="color: #88C0D0;"> set_frame_size</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">&amp;self</span><span style="color: #ECEFF4;">,</span><span> size</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> NSSize</span><span style="color: #ECEFF4;">) {</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            unsafe</span><span style="color: #ECEFF4;"> {</span><span style="color: #88C0D0;font-weight: bold;"> msg_send!</span><span style="color: #ECEFF4;">[</span><span style="color: #81A1C1;">super</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">self</span><span style="color: #ECEFF4;">),</span><span> setFrameSize</span><span style="color: #81A1C1;">:</span><span> size</span><span style="color: #ECEFF4;">] }</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            self.</span><span style="color: #88C0D0;">ivars</span><span style="color: #ECEFF4;">()</span><span style="color: #81A1C1;">.</span><span>tx</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">get</span><span style="color: #ECEFF4;">()</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">unwrap</span><span style="color: #ECEFF4;">()</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">send</span><span style="color: #ECEFF4;">(</span><span>MyMessage</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Resized</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span>                width</span><span style="color: #81A1C1;">:</span><span> size</span><span style="color: #81A1C1;">.</span><span>width </span><span style="color: #81A1C1;">as</span><span style="color: #8FBCBB;"> u32</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span>                height</span><span style="color: #81A1C1;">:</span><span> size</span><span style="color: #81A1C1;">.</span><span>height </span><span style="color: #81A1C1;">as</span><span style="color: #8FBCBB;"> u32</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">            })</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            .</span><span style="color: #88C0D0;">unwrap</span><span style="color: #ECEFF4;">();</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">        }</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    }</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #5E81AC;">#[derive(</span><span style="color: #8FBCBB;">Default</span><span style="color: #5E81AC;">)]</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">pub struct</span><span style="color: #8FBCBB;"> Ivars</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span>    tx</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> OnceLock</span><span style="color: #ECEFF4;">&lt;</span><span>mpsc</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Sender</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #8FBCBB;">MyMessage</span><span style="color: #ECEFF4;">&gt;&gt;,</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">impl</span><span style="color: #8FBCBB;"> MyNSView</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    pub fn</span><span style="color: #88C0D0;"> init</span><span style="color: #ECEFF4;">(</span><span>this</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Allocated</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">Self</span><span style="color: #ECEFF4;">&gt;,</span><span> tx</span><span style="color: #81A1C1;">:</span><span> mpsc</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Sender</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #8FBCBB;">MyMessage</span><span style="color: #ECEFF4;">&gt;)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Retained</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">Self</span><span style="color: #ECEFF4;">&gt; {</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        let</span><span> this</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Retained</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">Self</span><span style="color: #ECEFF4;">&gt;</span><span style="color: #81A1C1;"> = unsafe</span><span style="color: #ECEFF4;"> {</span><span style="color: #88C0D0;font-weight: bold;"> msg_send!</span><span style="color: #ECEFF4;">[</span><span>this</span><span style="color: #ECEFF4;">,</span><span> init</span><span style="color: #ECEFF4;">] };</span></span>
+<span class="giallo-l"><span>        this</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">ivars</span><span style="color: #ECEFF4;">()</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            .</span><span>tx</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            .</span><span style="color: #88C0D0;">set</span><span style="color: #ECEFF4;">(</span><span>tx</span><span style="color: #ECEFF4;">)</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            .</span><span style="color: #88C0D0;">unwrap</span><span style="color: #ECEFF4;">();</span></span>
+<span class="giallo-l"><span>        this</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    }</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre><h1 id="3-create-our-subview">3. Create our subview</h1>
+<p>Next we create the subview and add it to the content view:</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="rust"><span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_foundation</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">MainThreadMarker</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">fn</span><span style="color: #88C0D0;"> init_inner</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Buffer</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Result</span><span style="color: #ECEFF4;">&lt;(),</span><span style="color: #8FBCBB;"> Box</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">dyn</span><span style="color: #8FBCBB;"> Error</span><span style="color: #ECEFF4;">&gt;&gt; {</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> mtm</span><span style="color: #81A1C1;"> = unsafe</span><span style="color: #ECEFF4;"> {</span><span style="color: #8FBCBB;"> MainThreadMarker</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">new_unchecked</span><span style="color: #ECEFF4;">() };</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> my_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Allocated</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #8FBCBB;">MyNSView</span><span style="color: #ECEFF4;">&gt;</span><span style="color: #81A1C1;"> =</span><span> mtm</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">alloc</span><span style="color: #ECEFF4;">();</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span style="color: #ECEFF4;"> (</span><span>tx</span><span style="color: #ECEFF4;">,</span><span> rx</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> =</span><span> mpsc</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">channel</span><span style="color: #81A1C1;">::</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #8FBCBB;">MyMessage</span><span style="color: #ECEFF4;">&gt;();</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> my_view</span><span style="color: #81A1C1;"> =</span><span style="color: #8FBCBB;"> MyNSView</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">init</span><span style="color: #ECEFF4;">(</span><span>my_view</span><span style="color: #ECEFF4;">,</span><span> tx</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">clone</span><span style="color: #ECEFF4;">());</span></span>
+<span class="giallo-l"><span>    </span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    unsafe</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span>        content_view</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">addSubview_positioned_relativeTo</span><span style="color: #ECEFF4;">(</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            &amp;</span><span>my_view</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span>            objc2_app_kit</span><span style="color: #81A1C1;">::</span><span>NSWindowOrderingMode</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Below</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #8FBCBB;">            None</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">        );</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    }</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre><h1 id="4-set-constraints-on-our-subview">4. Set constraints on our subview</h1>
+<p>Next we set constraints on our subview so that macOS resizes it as the content
+view resizes.  You can also expose a Rust function (not shown) to alter the
+<a rel="external" href="https://developer.apple.com/documentation/uikit/nslayoutconstraint/constant">constants</a>
+from JS.</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="rust"><span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_app_kit</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">NSLayoutAttribute</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_app_kit</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">NSLayoutConstraint</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_app_kit</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">NSLayoutPriorityDefaultLow</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">use</span><span> objc2_app_kit</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">NSLayoutRelation</span><span style="color: #ECEFF4;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">fn</span><span style="color: #88C0D0;"> init_inner</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Buffer</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Result</span><span style="color: #ECEFF4;">&lt;(),</span><span style="color: #8FBCBB;"> Box</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">dyn</span><span style="color: #8FBCBB;"> Error</span><span style="color: #ECEFF4;">&gt;&gt; {</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    unsafe</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span>        my_view</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">setTranslatesAutoresizingMaskIntoConstraints</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">false</span><span style="color: #ECEFF4;">);</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    }</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> top_constraint</span><span style="color: #81A1C1;"> = unsafe</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span style="color: #8FBCBB;">        NSLayoutConstraint</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant</span><span style="color: #ECEFF4;">(</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">            &amp;</span><span>my_view</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span>            NSLayoutAttribute</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Top</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span>            NSLayoutRelation</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Equal</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #8FBCBB;">            Some</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">&amp;</span><span>content_view</span><span style="color: #ECEFF4;">),</span></span>
+<span class="giallo-l"><span style="color: #8FBCBB;">            NSLayoutAttribute</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Top</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #B48EAD;">            1</span><span style="color: #ECEFF4;">.</span><span style="color: #B48EAD;">0</span><span style="color: #ECEFF4;">,</span><span style="color: #616E88;">  // Multiplier</span></span>
+<span class="giallo-l"><span style="color: #B48EAD;">            0</span><span style="color: #ECEFF4;">.</span><span style="color: #B48EAD;">0</span><span style="color: #ECEFF4;">,</span><span style="color: #616E88;">  // Constant </span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">        )</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    };</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    unsafe</span><span style="color: #ECEFF4;"> {</span><span> top_constraint</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">setPriority</span><span style="color: #ECEFF4;">(</span><span style="color: #8FBCBB;">NSLayoutPriorityDefaultLow</span><span style="color: #ECEFF4;">) }</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    unsafe</span><span style="color: #ECEFF4;"> {</span><span> content_view</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">addConstraint</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">&amp;</span><span>top_constraint</span><span style="color: #ECEFF4;">) }</span></span>
+<span class="giallo-l"><span>    </span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre><h1 id="5-create-the-wgpu-surface">5. Create the wgpu surface</h1>
+<p>Next we create the wgpu surface from the subview.  Note that we must create (and
+drop) this surface in the main thread.</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="rust"><span class="giallo-l"><span style="color: #81A1C1;">fn</span><span style="color: #88C0D0;"> init_inner</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Buffer</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Result</span><span style="color: #ECEFF4;">&lt;(),</span><span style="color: #8FBCBB;"> Box</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">dyn</span><span style="color: #8FBCBB;"> Error</span><span style="color: #ECEFF4;">&gt;&gt; {</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> instance</span><span style="color: #81A1C1;"> =</span><span> wgpu</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Instance</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">default</span><span style="color: #ECEFF4;">();</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> raw_display_handle</span><span style="color: #81A1C1;"> =</span><span> raw_window_handle</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">RawDisplayHandle</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">AppKit</span><span style="color: #ECEFF4;">(</span></span>
+<span class="giallo-l"><span>        raw_window_handle</span><span style="color: #81A1C1;">::</span><span>AppKitDisplayHandle</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">new</span><span style="color: #ECEFF4;">(),</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    );</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> raw_window_handle</span><span style="color: #81A1C1;"> =</span></span>
+<span class="giallo-l"><span>        raw_window_handle</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">RawWindowHandle</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">AppKit</span><span style="color: #ECEFF4;">(</span><span>raw_window_handle</span><span style="color: #81A1C1;">::</span><span>AppKitWindowHandle</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">new</span><span style="color: #ECEFF4;">(</span></span>
+<span class="giallo-l"><span>            std</span><span style="color: #81A1C1;">::</span><span>ptr</span><span style="color: #81A1C1;">::</span><span>NonNull</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">new</span><span style="color: #ECEFF4;">(</span><span>Retained</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">as_ptr</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">&amp;</span><span>video_view</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">cast_mut</span><span style="color: #ECEFF4;">()</span><span style="color: #81A1C1;"> as *mut</span><span> _</span><span style="color: #ECEFF4;">)</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">                .</span><span style="color: #88C0D0;">expect</span><span style="color: #ECEFF4;">(&quot;</span><span style="color: #A3BE8C;">overlay should be non-null</span><span style="color: #ECEFF4;">&quot;),</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">        ));</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> surface_target</span><span style="color: #81A1C1;"> =</span><span> wgpu</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">SurfaceTargetUnsafe</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">RawHandle</span><span style="color: #ECEFF4;"> {</span></span>
+<span class="giallo-l"><span>        raw_display_handle</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span>        raw_window_handle</span><span style="color: #ECEFF4;">,</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">    };</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> my_surface</span><span style="color: #81A1C1;"> =</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        unsafe</span><span style="color: #ECEFF4;"> {</span><span> instance</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">create_surface_unsafe</span><span style="color: #ECEFF4;">(</span><span>surface_target</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;">?</span><span style="color: #ECEFF4;"> };</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre><h1 id="6-spawn-the-rendering-thread">6. Spawn the rendering thread</h1>
+<p>Finally we spawn our rendering thread, passing in the receive channel and
+surface.  It's useful to store the constraints, surface and join handle in some
+context structure (I used a thread-local variable, not shown).</p>
+<pre class="giallo" style="color: #D8DEE9; background-color: #2E3440;"><code data-lang="rust"><span class="giallo-l"><span style="color: #81A1C1;">fn</span><span style="color: #88C0D0;"> init_inner</span><span style="color: #ECEFF4;">(</span><span>content_view</span><span style="color: #81A1C1;">:</span><span style="color: #8FBCBB;"> Buffer</span><span style="color: #ECEFF4;">)</span><span style="color: #81A1C1;"> -&gt;</span><span style="color: #8FBCBB;"> Result</span><span style="color: #ECEFF4;">&lt;(),</span><span style="color: #8FBCBB;"> Box</span><span style="color: #ECEFF4;">&lt;</span><span style="color: #81A1C1;">dyn</span><span style="color: #8FBCBB;"> Error</span><span style="color: #ECEFF4;">&gt;&gt; {</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let mut</span><span> renderer</span><span style="color: #81A1C1;"> =</span><span style="color: #8FBCBB;"> Renderer</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">new</span><span style="color: #ECEFF4;">(</span><span>rx</span><span style="color: #ECEFF4;">,</span><span> surface</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">clone</span><span style="color: #ECEFF4;">());</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">    let</span><span> join_handle</span><span style="color: #81A1C1;"> =</span><span> thread</span><span style="color: #81A1C1;">::</span><span style="color: #8FBCBB;">Builder</span><span style="color: #81A1C1;">::</span><span style="color: #88C0D0;">new</span><span style="color: #ECEFF4;">()</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        .</span><span style="color: #88C0D0;">name</span><span style="color: #ECEFF4;">(&quot;</span><span style="color: #A3BE8C;">renderer</span><span style="color: #ECEFF4;">&quot;</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">into</span><span style="color: #ECEFF4;">())</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        .</span><span style="color: #88C0D0;">spawn</span><span style="color: #ECEFF4;">(</span><span style="color: #81A1C1;">move ||</span><span> renderer</span><span style="color: #81A1C1;">.</span><span style="color: #88C0D0;">run</span><span style="color: #ECEFF4;">())</span></span>
+<span class="giallo-l"><span style="color: #81A1C1;">        .</span><span style="color: #88C0D0;">unwrap</span><span style="color: #ECEFF4;">();</span></span>
+<span class="giallo-l"><span style="color: #616E88;">    // ...</span></span>
+<span class="giallo-l"><span style="color: #ECEFF4;">}</span></span></code></pre>
+    </div>
+
+    
+    <div class="article-info">
+        
+        <div class="article-date"> 6 March 2025</div>
+        
+        <div class="article-taxonomies">
+            
+            
+        </div>
+    </div>
+
+</article>
+
+
+        </main>
+        <footer>
+            <p>
+                
+                
+            </p>
+        </footer>
+    </div>
+</body>
+</html>
